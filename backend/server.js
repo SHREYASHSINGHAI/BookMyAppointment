@@ -37,6 +37,7 @@ app.use("/api/appointments", require("./routes/appointments"));
 app.use("/api/chat", require("./routes/chat"));
 app.use("/api/webhook/whatsapp", require("./routes/whatsapp"));
 app.use("/api/payment", require("./routes/razorpay").paymentRouter);
+app.use("/api/payments", require("./routes/payments"));
 // app.use("/api/calendar", require("./routes/calendar"));
 // app.use("/api/voice", require("./routes/voice"));
 app.use("/api/admin", require("./routes/admin"));
