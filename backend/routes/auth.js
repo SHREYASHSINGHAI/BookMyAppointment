@@ -231,10 +231,9 @@ router.get("/google/callback", async (req, res) => {
         const tokens = await exchangeCodeForTokens(code);
 
         // Store tokens in Database
-        const dentist = await require("../services/database").getDentistById(dentistId);
-        await updateDentist(dentist.id, {
-            GoogleCalendarToken: JSON.stringify(tokens),
-            GoogleCalendarId: "primary",
+        await updateDentist(dentistId, {
+            googleCalendarToken: JSON.stringify(tokens),
+            googleCalendarId: "primary",
         });
 
         res.send(`
