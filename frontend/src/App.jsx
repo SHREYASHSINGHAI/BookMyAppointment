@@ -1,9 +1,8 @@
 import { BrowserRouter as Router, Routes, Route, useLocation } from 'react-router-dom';
-import { useState, useEffect } from 'react';
-import { AnimatePresence } from 'framer-motion';
 
 // Layout
 import Layout from './components/Layout';
+import AuthGuard from './components/AuthGuard';
 
 // Pages
 import HomePage from './pages/HomePage';
@@ -19,9 +18,8 @@ import AdminLoginPage from './pages/AdminLoginPage';
 import AdminDashboardPage from './pages/AdminDashboardPage';
 import AdminReportsPage from './pages/AdminReportsPage';
 import ChatPage from './pages/ChatPage';
-function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(true); // Set to true for dev preview
 
+function App() {
   return (
     <Router>
       <Routes>
@@ -36,12 +34,14 @@ function App() {
         <Route path="/signup" element={<SignupPage />} />
         <Route path="/login" element={<LoginPage />} />
 
-        {/* Protected Dashboard Routes */}
-        <Route path="/onboarding" element={<OnboardingPage />} />
-        <Route path="/chat" element={<ChatPage />} />
-        <Route path="/dashboard" element={<DashboardPage />} />
-        <Route path="/queries" element={<QueriesPage />} />
-        <Route path="/status" element={<StatusPage />} />
+        {/* Protected Dashboard Routes — redirect to /login if not authenticated */}
+        <Route element={<AuthGuard />}>
+          <Route path="/onboarding" element={<OnboardingPage />} />
+          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/queries" element={<QueriesPage />} />
+          <Route path="/status" element={<StatusPage />} />
+        </Route>
 
         {/* Developer Admin Routes */}
         <Route path="/admin" element={<AdminLoginPage />} />

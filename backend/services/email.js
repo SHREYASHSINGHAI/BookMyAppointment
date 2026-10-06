@@ -7,7 +7,7 @@ async function sendOTPEmail(toEmail, otpCode) {
   }
 
   // Use a default sender if not configured
-  const fromEmail = process.env.FROM_EMAIL || "noreply@jainshreyash001@gmail.com";
+  const fromEmail = process.env.FROM_EMAIL || "noreply@bookmyappointment.online";
   const subject = "Reset your BookMyAppointment Password";
 
   const htmlContent = `

@@ -62,7 +62,7 @@ router.post('/verify', auth, async (req, res) => {
       if (!dentist) return res.status(404).json({ error: "Dentist not found" });
 
       await updateDentist(dentist.id, {
-        SubscriptionStatus: plan || "active"
+        subscriptionStatus: plan || "active"
       });
 
       res.json({ success: true, message: "Payment verified successfully" });
@@ -79,7 +79,12 @@ router.post('/verify', auth, async (req, res) => {
 const webhookRouter = express.Router();
 webhookRouter.post('/', express.json(), (req, res) => {
   const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-  
+
+  if (!secret) {
+    console.error('[Razorpay Webhook] RAZORPAY_WEBHOOK_SECRET is not configured.');
+    return res.status(400).send('Webhook secret not configured');
+  }
+
   // Verify Webhook Signature
   const signature = req.headers['x-razorpay-signature'];
   const expectedSignature = crypto

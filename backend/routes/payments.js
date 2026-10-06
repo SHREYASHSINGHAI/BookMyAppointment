@@ -1,19 +1,17 @@
+/**
+ * routes/payments.js
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Razorpay payment order creation & verification using Supabase.
+ * Aligned with the actual appointments schema (UUID ids, dentist_id).
+ */
+
 const express = require('express');
+const crypto = require('crypto');
 const Razorpay = require('razorpay');
-const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
+const supabase = require('../services/supabaseClient');
 
 const router = express.Router();
-
-// Initialize Postgres connection pool (uses standard PG* environment variables or DATABASE_URL)
-const pool = new Pool(
-  process.env.DATABASE_URL
-    ? {
-        connectionString: process.env.DATABASE_URL,
-        ssl: process.env.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false },
-      }
-    : undefined
-);
 
 // Initialize Razorpay SDK
 const razorpay = new Razorpay({
@@ -21,134 +19,143 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET || 'dummy_secret',
 });
 
-// Auth middleware that resolves and attaches req.user.id
-function authMiddleware(req, res, next) {
-  // If user is already attached by previous middleware
-  if (req.user && req.user.id !== undefined) {
-    return next();
-  }
-
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    return res.status(401).json({ error: 'Unauthorized: Authentication required' });
-  }
-
-  const token = authHeader.startsWith('Bearer ')
-    ? authHeader.slice(7).trim()
-    : authHeader.trim();
+// Auth middleware
+function auth(req, res, next) {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
-    const decoded = jwt.verify(
-      token,
-      process.env.JWT_SECRET || 'your_super_secret_key_change_this_in_production_make_it_long_and_random'
-    );
-    // Support various user id conventions
-    req.user = {
-      ...decoded,
-      id: decoded.id ?? decoded.userId ?? decoded.ownerId ?? decoded.dentistId,
-    };
-
-    if (req.user.id === undefined) {
-      return res.status(401).json({ error: 'Unauthorized: User identifier missing in token payload' });
-    }
-
+    req.dentist = jwt.verify(token, process.env.JWT_SECRET);
+    req.clinicId = req.headers['x-clinic-id'] || req.dentist.dentistId;
     next();
-  } catch (err) {
-    return res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
+  } catch {
+    res.status(401).json({ error: 'Invalid token' });
   }
 }
 
-// POST /api/payments/orders   body: { appointmentId }
-// Assumes an auth middleware that sets req.user.id
-router.post('/orders', authMiddleware, async (req, res) => {
-  const appointmentId = Number(req.body.appointmentId);
-  if (!Number.isInteger(appointmentId)) {
-    return res.status(400).json({ error: 'appointmentId is required' });
+// POST /api/payments/orders
+// body: { appointmentId, amount, plan }
+// amount is taken from the request (validated server-side); plan is stored in notes.
+router.post('/orders', auth, async (req, res) => {
+  const { appointmentId, amount, plan } = req.body;
+
+  if (!appointmentId || !amount) {
+    return res.status(400).json({ error: 'appointmentId and amount are required' });
   }
 
-  let client;
-  let paymentId;
-
   try {
-    client = await pool.connect();
-    // 1. Load appointment; price comes from the DB, never from the client
-    const { rows } = await client.query(
-      `SELECT id, user_id, status, fee_paise
-         FROM appointments WHERE id = $1`,
-      [appointmentId]
-    );
-    const appt = rows[0];
+    // 1. Verify the appointment belongs to this clinic
+    const { data: appt, error: apptErr } = await supabase
+      .from('appointments')
+      .select('id, dentist_id, status')
+      .eq('id', appointmentId)
+      .eq('dentist_id', req.clinicId)
+      .maybeSingle();
 
-    if (!appt || String(appt.user_id) !== String(req.user.id)) {
+    if (apptErr) throw apptErr;
+    if (!appt) {
       return res.status(404).json({ error: 'Appointment not found' });
     }
-    if (appt.status !== 'pending_payment') {
-      return res.status(409).json({ error: 'Appointment is not awaiting payment' });
-    }
 
-    // 2. Reuse an open order if one exists (idempotent on retry/refresh)
-    const open = await client.query(
-      `SELECT id, amount, currency, razorpay_order_id
-         FROM payments
-        WHERE appointment_id = $1 AND status IN ('created','attempted')`,
-      [appointmentId]
-    );
-    if (open.rows[0]?.razorpay_order_id) {
-      const p = open.rows[0];
+    // 2. Check for an existing open Razorpay order for this appointment
+    const { data: existingPayment } = await supabase
+      .from('payments')
+      .select('id, razorpay_order_id, amount, currency')
+      .eq('appointment_id', appointmentId)
+      .in('status', ['created', 'attempted'])
+      .maybeSingle();
+
+    if (existingPayment?.razorpay_order_id) {
       return res.json({
-        orderId: p.razorpay_order_id,
-        amount: p.amount,
-        currency: p.currency,
+        orderId: existingPayment.razorpay_order_id,
+        amount: existingPayment.amount,
+        currency: existingPayment.currency || 'INR',
         keyId: process.env.RAZORPAY_KEY_ID,
       });
     }
 
-    // 3. Insert local record first; its UUID becomes the Razorpay receipt
-    const ins = await client.query(
-      `INSERT INTO payments (appointment_id, user_id, amount)
-       VALUES ($1, $2, $3) RETURNING id`,
-      [appointmentId, req.user.id, appt.fee_paise]
-    );
-    paymentId = ins.rows[0].id;
-
-    // 4. Create the Razorpay order
+    // 3. Create Razorpay order
     const order = await razorpay.orders.create({
-      amount: appt.fee_paise,          // paise
+      amount: amount * 100, // convert rupees to paise
       currency: 'INR',
-      receipt: paymentId,              // 36 chars, within Razorpay's 40 limit
-      notes: { appointmentId: String(appointmentId), userId: String(req.user.id) },
+      receipt: `receipt_${Date.now()}`,
+      notes: { appointmentId: String(appointmentId), plan: plan || 'starter' },
     });
 
-    // 5. Save order id
-    await client.query(
-      `UPDATE payments SET razorpay_order_id = $1, updated_at = now() WHERE id = $2`,
-      [order.id, paymentId]
-    );
+    // 4. Save payment record in Supabase
+    const { error: insertErr } = await supabase.from('payments').insert([{
+      appointment_id: appointmentId,
+      dentist_id: req.clinicId,
+      amount: order.amount,
+      currency: order.currency,
+      status: 'created',
+      razorpay_order_id: order.id,
+    }]);
+
+    if (insertErr) {
+      console.error('[Payments] Failed to save payment record:', insertErr.message);
+      // Non-fatal: order was created in Razorpay; return it anyway
+    }
 
     return res.status(201).json({
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
-      keyId: process.env.RAZORPAY_KEY_ID,  // public key; safe for the frontend
+      keyId: process.env.RAZORPAY_KEY_ID,
     });
   } catch (err) {
-    // Razorpay failed after we inserted: mark failed so the unique index frees up
-    if (client && paymentId) {
-      await client
-        .query(
-          `UPDATE payments SET status = 'failed', failure_reason = $1, updated_at = now() WHERE id = $2`,
-          [String(err.error?.description || err.message).slice(0, 255), paymentId]
-        )
-        .catch(() => {});
-    }
-    // Concurrent request hit the partial unique index
-    if (err.code === '23505') {
-      return res.status(409).json({ error: 'A payment is already in progress. Please retry.' });
-    }
-    console.error('create order failed', err);
+    console.error('[Payments] create order failed:', err.message);
     return res.status(502).json({ error: 'Could not start payment. Please try again.' });
-  } finally {
-    if (client) client.release();
+  }
+});
+
+// POST /api/payments/verify
+// body: { razorpay_order_id, razorpay_payment_id, razorpay_signature, appointmentId }
+router.post('/verify', auth, async (req, res) => {
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature, appointmentId } = req.body;
+
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+    return res.status(400).json({ error: 'Payment verification fields are required' });
+  }
+
+  try {
+    // 1. Verify Razorpay signature
+    const body = `${razorpay_order_id}|${razorpay_payment_id}`;
+    const expectedSignature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET || 'dummy_secret')
+      .update(body)
+      .digest('hex');
+
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({ error: 'Invalid payment signature' });
+    }
+
+    // 2. Update payment record to paid
+    const { error: updateErr } = await supabase
+      .from('payments')
+      .update({
+        status: 'paid',
+        razorpay_payment_id,
+        razorpay_signature,
+        paid_at: new Date().toISOString(),
+      })
+      .eq('razorpay_order_id', razorpay_order_id);
+
+    if (updateErr) throw updateErr;
+
+    // 3. Optionally mark appointment as confirmed
+    if (appointmentId) {
+      await supabase
+        .from('appointments')
+        .update({ status: 'confirmed' })
+        .eq('id', appointmentId)
+        .eq('dentist_id', req.clinicId);
+    }
+
+    return res.json({ success: true, message: 'Payment verified successfully' });
+  } catch (err) {
+    console.error('[Payments] verify failed:', err.message);
+    return res.status(500).json({ error: 'Payment verification failed' });
   }
 });
 

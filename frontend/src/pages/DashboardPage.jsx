@@ -123,7 +123,7 @@ const DashboardPage = () => {
   };
 
   return (
-    <div className="flex min-h-screen bg-white pt-28 text-[#0a2540]">
+    <div className="flex min-h-screen bg-white text-[#0a2540]">
       {/* Sidebar */}
       <Sidebar handleLogout={handleLogout} />
 
